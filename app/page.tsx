@@ -2,7 +2,6 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { Button } from "@/components/ui/button"
 import Header from "@/components/Header"
 import HeroSection from "@/components/HeroSection"
 import FeatureCards from "@/components/FeatureCards"
@@ -51,7 +50,7 @@ export default function SpotifyListenerStatsPage() {
 
       <FeatureCards onLogin={handleSpotifyLogin} />
 
-      <DataOwnershipSection />
+      {/* <DataOwnershipSection /> */}
 
       <TestimonialsSection />
 
@@ -59,7 +58,7 @@ export default function SpotifyListenerStatsPage() {
 
       <LoginCTASection onLogin={handleSpotifyLogin} />
 
-      <StatsCounterSection listeningMinutes={listeningMinutes} topArtists={topArtists} />
+      {/* <StatsCounterSection listeningMinutes={listeningMinutes} topArtists={topArtists} /> */}
 
       <Footer />
     </div>
