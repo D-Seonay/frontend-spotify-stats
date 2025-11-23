@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
-import { Menu, X, Music, TrendingUp, Heart, Clock, Share2, Download, Lock, Check } from "lucide-react"
+import { TrendingUp, Music, Share2, Lock, Menu, X, Check, Heart, Clock, Download } from "lucide-react"
 
 export default function SpotifyListenerStatsPage() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
@@ -26,10 +26,7 @@ export default function SpotifyListenerStatsPage() {
   }, [])
 
   const handleSpotifyLogin = () => {
-    console.log("[v0] Spotify login initiated")
-    // In production, this would redirect to Spotify OAuth
-    window.location.href =
-      "https://accounts.spotify.com/authorize?client_id=YOUR_CLIENT_ID&response_type=code&redirect_uri=YOUR_REDIRECT_URI&scope=user-read-private%20user-read-email%20user-top-read%20user-read-recently-played"
+    window.location.href = "/login"
   }
 
   return (
@@ -384,7 +381,7 @@ export default function SpotifyListenerStatsPage() {
                 </div>
               </Card>
 
-              <Card className="group relative border-white/10 bg-gradient-to-br from-white/5 to-white/[0.02] p-6 backdrop-blur-sm transition-all duration-500 hover:scale-105 hover:border-[#1DB954]/50 hover:shadow-2xl hover:shadow-[#1DB954]/20">
+              <Card className="group relative border-white/10 bg-gradient-to-br from-white/5 to-white/[0.02] p-6 backdrop-blur-sm">
                 <div className="mb-4 flex items-center gap-3">
                   <div className="h-12 w-12 overflow-hidden rounded-full bg-[#1DB954]">
                     <img src="/happy-user.jpg" alt="Sofia R." className="h-full w-full object-cover" />
