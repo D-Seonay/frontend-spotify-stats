@@ -5,7 +5,7 @@ import type React from "react"
 import { useState, useCallback, useRef } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
-import { Upload, FileText, X, CheckCircle, AlertCircle, Music, Clock, Calendar } from "lucide-react"
+import { Upload, FileText, X, CheckCircle, AlertCircle, Music, Clock, Calendar, Files, Trash2 } from "lucide-react"
 
 interface SpotifyStreamingData {
   endTime: string
@@ -24,12 +24,20 @@ interface ParsedStats {
   listeningByMonth: { month: string; minutes: number }[]
 }
 
+interface FileInfo {
+  file: File
+  status: "pending" | "processing" | "success" | "error"
+  error?: string
+  recordCount?: number
+}
+
 export function CsvImporter({ onDataImported }: { onDataImported?: (data: ParsedStats) => void }) {
   const [isDragging, setIsDragging] = useState(false)
-  const [file, setFile] = useState<File | null>(null)
+  const [files, setFiles] = useState<FileInfo[]>([])
   const [isProcessing, setIsProcessing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [parsedData, setParsedData] = useState<ParsedStats | null>(null)
+  const [allRawData, setAllRawData] = useState<SpotifyStreamingData[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const parseCSV = (text: string): SpotifyStreamingData[] => {
@@ -89,20 +97,17 @@ export function CsvImporter({ onDataImported }: { onDataImported?: (data: Parsed
       const minutes = item.msPlayed / 60000
       totalMinutes += minutes
 
-      // Track stats
       const trackKey = `${item.trackName}|||${item.artistName}`
       const trackStats = trackMap.get(trackKey) || { plays: 0, minutes: 0, artist: item.artistName }
       trackStats.plays++
       trackStats.minutes += minutes
       trackMap.set(trackKey, trackStats)
 
-      // Artist stats
       const artistStats = artistMap.get(item.artistName) || { plays: 0, minutes: 0 }
       artistStats.plays++
       artistStats.minutes += minutes
       artistMap.set(item.artistName, artistStats)
 
-      // Monthly stats
       if (item.endTime) {
         const date = new Date(item.endTime)
         const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`
@@ -138,32 +143,72 @@ export function CsvImporter({ onDataImported }: { onDataImported?: (data: Parsed
     }
   }
 
-  const processFile = async (file: File) => {
+  const processSingleFile = async (file: File): Promise<SpotifyStreamingData[]> => {
+    const text = await file.text()
+    if (file.name.endsWith(".json")) {
+      return parseJSON(text)
+    } else {
+      return parseCSV(text)
+    }
+  }
+
+  const processAllFiles = async () => {
+    if (files.length === 0) return
+
     setIsProcessing(true)
     setError(null)
 
-    try {
-      const text = await file.text()
-      let data: SpotifyStreamingData[]
+    const updatedFiles = [...files]
+    const combinedData: SpotifyStreamingData[] = []
 
-      if (file.name.endsWith(".json")) {
-        data = parseJSON(text)
-      } else {
-        data = parseCSV(text)
+    for (let i = 0; i < updatedFiles.length; i++) {
+      const fileInfo = updatedFiles[i]
+      if (fileInfo.status === "success") {
+        continue
       }
 
-      if (data.length === 0) {
-        throw new Error("Aucune donnée valide trouvée dans le fichier")
-      }
+      updatedFiles[i] = { ...fileInfo, status: "processing" }
+      setFiles([...updatedFiles])
 
-      const stats = analyzeData(data)
+      try {
+        const data = await processSingleFile(fileInfo.file)
+        if (data.length === 0) {
+          updatedFiles[i] = {
+            ...fileInfo,
+            status: "error",
+            error: "Aucune donnée valide trouvée",
+          }
+        } else {
+          combinedData.push(...data)
+          updatedFiles[i] = {
+            ...fileInfo,
+            status: "success",
+            recordCount: data.length,
+          }
+        }
+      } catch (err) {
+        updatedFiles[i] = {
+          ...fileInfo,
+          status: "error",
+          error: err instanceof Error ? err.message : "Erreur de traitement",
+        }
+      }
+      setFiles([...updatedFiles])
+    }
+
+    // Combine with existing data
+    const allData = [...allRawData, ...combinedData]
+    setAllRawData(allData)
+
+    if (allData.length > 0) {
+      const stats = analyzeData(allData)
       setParsedData(stats)
       onDataImported?.(stats)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Erreur lors du traitement du fichier")
-    } finally {
-      setIsProcessing(false)
+    } else if (combinedData.length === 0 && allRawData.length === 0) {
+      setError("Aucune donnée valide trouvée dans les fichiers importés")
     }
+
+    setIsProcessing(false)
   }
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -179,31 +224,88 @@ export function CsvImporter({ onDataImported }: { onDataImported?: (data: Parsed
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
     setIsDragging(false)
-    const droppedFile = e.dataTransfer.files[0]
-    if (droppedFile && (droppedFile.name.endsWith(".csv") || droppedFile.name.endsWith(".json"))) {
-      setFile(droppedFile)
-      processFile(droppedFile)
-    } else {
-      setError("Veuillez importer un fichier CSV ou JSON")
+
+    const droppedFiles = Array.from(e.dataTransfer.files)
+    const validFiles = droppedFiles.filter((f) => f.name.endsWith(".csv") || f.name.endsWith(".json"))
+
+    if (validFiles.length === 0) {
+      setError("Veuillez importer des fichiers CSV ou JSON")
+      return
     }
+
+    const newFiles: FileInfo[] = validFiles.map((file) => ({
+      file,
+      status: "pending" as const,
+    }))
+
+    setFiles((prev) => [...prev, ...newFiles])
+    setError(null)
   }, [])
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const selectedFile = e.target.files?.[0]
-    if (selectedFile) {
-      setFile(selectedFile)
-      processFile(selectedFile)
+    const selectedFiles = Array.from(e.target.files || [])
+    if (selectedFiles.length > 0) {
+      const newFiles: FileInfo[] = selectedFiles.map((file) => ({
+        file,
+        status: "pending" as const,
+      }))
+      setFiles((prev) => [...prev, ...newFiles])
+      setError(null)
     }
   }
 
+  const removeFile = (index: number) => {
+    setFiles((prev) => prev.filter((_, i) => i !== index))
+  }
+
+  const clearAllFiles = () => {
+    setFiles([])
+    setError(null)
+  }
+
   const resetImport = () => {
-    setFile(null)
+    setFiles([])
     setParsedData(null)
     setError(null)
+    setAllRawData([])
     if (fileInputRef.current) {
       fileInputRef.current.value = ""
     }
   }
+
+  const getStatusBadge = (status: FileInfo["status"]) => {
+    switch (status) {
+      case "pending":
+        return "bg-yellow-500/20 text-yellow-400"
+      case "processing":
+        return "bg-blue-500/20 text-blue-400"
+      case "success":
+        return "bg-[#1DB954]/20 text-[#1DB954]"
+      case "error":
+        return "bg-red-500/20 text-red-400"
+      default:
+        return "bg-gray-500/20 text-gray-400"
+    }
+  }
+
+  const getStatusText = (status: FileInfo["status"]) => {
+    switch (status) {
+      case "pending":
+        return "En attente"
+      case "processing":
+        return "Traitement..."
+      case "success":
+        return "Importé"
+      case "error":
+        return "Erreur"
+      default:
+        return status
+    }
+  }
+
+  const pendingCount = files.filter((f) => f.status === "pending").length
+  const successCount = files.filter((f) => f.status === "success").length
+  const errorCount = files.filter((f) => f.status === "error").length
 
   return (
     <div className="space-y-6">
@@ -227,62 +329,141 @@ export function CsvImporter({ onDataImported }: { onDataImported?: (data: Parsed
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {!parsedData ? (
-            <>
-              <div
-                onDragOver={handleDragOver}
-                onDragLeave={handleDragLeave}
-                onDrop={handleDrop}
-                className={`relative cursor-pointer rounded-xl border-2 border-dashed p-8 text-center transition-all ${
-                  isDragging
-                    ? "border-[#1DB954] bg-[#1DB954]/10"
-                    : "border-white/20 hover:border-[#1DB954]/50 hover:bg-white/5"
-                }`}
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept=".csv,.json"
-                  onChange={handleFileSelect}
-                  className="hidden"
-                />
+          <div
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            className={`relative cursor-pointer rounded-xl border-2 border-dashed p-8 text-center transition-all ${
+              isDragging
+                ? "border-[#1DB954] bg-[#1DB954]/10"
+                : "border-white/20 hover:border-[#1DB954]/50 hover:bg-white/5"
+            }`}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csv,.json"
+              multiple
+              onChange={handleFileSelect}
+              className="hidden"
+            />
 
-                {isProcessing ? (
-                  <div className="flex flex-col items-center gap-4">
-                    <div className="h-12 w-12 animate-spin rounded-full border-4 border-[#1DB954] border-t-transparent" />
-                    <p className="text-gray-400">Analyse des données en cours...</p>
-                  </div>
-                ) : (
-                  <>
-                    <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-[#1DB954]/20">
-                      <FileText className="h-8 w-8 text-[#1DB954]" />
-                    </div>
-                    <p className="mb-2 text-lg font-medium">
-                      Glisse ton fichier ici ou <span className="text-[#1DB954]">clique pour parcourir</span>
-                    </p>
-                    <p className="text-sm text-gray-400">
-                      Formats acceptés: StreamingHistory.json, endsong.json, ou fichiers CSV exportés
-                    </p>
-                  </>
-                )}
+            <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-[#1DB954]/20">
+              <Files className="h-8 w-8 text-[#1DB954]" />
+            </div>
+            <p className="mb-2 text-lg font-medium">
+              Glisse tes fichiers ici ou <span className="text-[#1DB954]">clique pour parcourir</span>
+            </p>
+            <p className="text-sm text-gray-400">
+              Sélection multiple activée - StreamingHistory.json, endsong.json, ou fichiers CSV
+            </p>
+          </div>
+
+          {error && (
+            <div className="mt-4 flex items-center gap-2 rounded-lg bg-red-500/10 p-4 text-red-400">
+              <AlertCircle className="h-5 w-5 flex-shrink-0" />
+              <p>{error}</p>
+            </div>
+          )}
+
+          {files.length > 0 && (
+            <div className="mt-6 space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-4">
+                  <h4 className="font-semibold text-white">Fichiers sélectionnés ({files.length})</h4>
+                  {successCount > 0 && (
+                    <span className="rounded-full bg-[#1DB954]/20 px-2 py-1 text-xs text-[#1DB954]">
+                      {successCount} importé{successCount > 1 ? "s" : ""}
+                    </span>
+                  )}
+                  {errorCount > 0 && (
+                    <span className="rounded-full bg-red-500/20 px-2 py-1 text-xs text-red-400">
+                      {errorCount} erreur{errorCount > 1 ? "s" : ""}
+                    </span>
+                  )}
+                </div>
+                <Button variant="ghost" size="sm" onClick={clearAllFiles} className="text-gray-400 hover:text-red-400">
+                  <Trash2 className="mr-2 h-4 w-4" />
+                  Tout effacer
+                </Button>
               </div>
 
-              {error && (
-                <div className="mt-4 flex items-center gap-2 rounded-lg bg-red-500/10 p-4 text-red-400">
-                  <AlertCircle className="h-5 w-5 flex-shrink-0" />
-                  <p>{error}</p>
-                </div>
-              )}
+              <div className="max-h-60 space-y-2 overflow-y-auto rounded-lg border border-white/10 bg-white/5 p-3">
+                {files.map((fileInfo, index) => (
+                  <div
+                    key={`${fileInfo.file.name}-${index}`}
+                    className="flex items-center justify-between rounded-lg bg-white/5 p-3 transition-all hover:bg-white/10"
+                  >
+                    <div className="flex items-center gap-3 min-w-0 flex-1">
+                      <FileText className="h-5 w-5 flex-shrink-0 text-[#1DB954]" />
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate font-medium text-white">{fileInfo.file.name}</p>
+                        <p className="text-xs text-gray-500">
+                          {(fileInfo.file.size / 1024).toFixed(1)} KB
+                          {fileInfo.recordCount && ` • ${fileInfo.recordCount.toLocaleString()} entrées`}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      <span className={`rounded-full px-2 py-1 text-xs ${getStatusBadge(fileInfo.status)}`}>
+                        {fileInfo.status === "processing" ? (
+                          <span className="flex items-center gap-1">
+                            <span className="h-3 w-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                            {getStatusText(fileInfo.status)}
+                          </span>
+                        ) : (
+                          getStatusText(fileInfo.status)
+                        )}
+                      </span>
+                      {fileInfo.status !== "processing" && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            removeFile(index)
+                          }}
+                          className="rounded p-1 text-gray-400 hover:bg-white/10 hover:text-red-400"
+                        >
+                          <X className="h-4 w-4" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
 
-              {/* Instructions */}
-              <div className="mt-6 rounded-lg border border-white/10 bg-white/5 p-4">
-                <h4 className="mb-3 font-semibold text-white">Comment obtenir tes données Spotify ?</h4>
-                <ol className="space-y-2 text-sm text-gray-400">
-                  <li className="flex gap-2">
-                    <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-[#1DB954]/20 text-xs text-[#1DB954]">
-                      1
-                    </span>
+              {pendingCount > 0 && (
+                <Button
+                  onClick={processAllFiles}
+                  disabled={isProcessing}
+                  className="w-full bg-[#1DB954] text-black hover:bg-[#1ed760] disabled:opacity-50"
+                >
+                  {isProcessing ? (
+                    <>
+                      <span className="mr-2 h-4 w-4 animate-spin rounded-full border-2 border-black border-t-transparent" />
+                      Traitement en cours...
+                    </>
+                  ) : (
+                    <>
+                      <Upload className="mr-2 h-4 w-4" />
+                      Importer {pendingCount} fichier{pendingCount > 1 ? "s" : ""}
+                    </>
+                  )}
+                </Button>
+              )}
+            </div>
+          )}
+
+          {/* Instructions */}
+          {files.length === 0 && !parsedData && (
+            <div className="mt-6 rounded-lg border border-white/10 bg-white/5 p-4">
+              <h4 className="mb-3 font-semibold text-white">Comment obtenir tes données Spotify ?</h4>
+              <ol className="space-y-2 text-sm text-gray-400">
+                <li className="flex gap-2">
+                  <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-[#1DB954]/20 text-xs text-[#1DB954]">
+                    1
+                  </span>
+                  <span>
                     Connecte-toi sur{" "}
                     <a
                       href="https://www.spotify.com/account/privacy/"
@@ -292,42 +473,27 @@ export function CsvImporter({ onDataImported }: { onDataImported?: (data: Parsed
                     >
                       spotify.com/account/privacy
                     </a>
-                  </li>
-                  <li className="flex gap-2">
-                    <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-[#1DB954]/20 text-xs text-[#1DB954]">
-                      2
-                    </span>
-                    Demande une copie de tes données (section "Télécharger tes données")
-                  </li>
-                  <li className="flex gap-2">
-                    <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-[#1DB954]/20 text-xs text-[#1DB954]">
-                      3
-                    </span>
-                    Tu recevras un email avec un lien de téléchargement sous 30 jours
-                  </li>
-                  <li className="flex gap-2">
-                    <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-[#1DB954]/20 text-xs text-[#1DB954]">
-                      4
-                    </span>
-                    Importe les fichiers StreamingHistory ou endsong ici
-                  </li>
-                </ol>
-              </div>
-            </>
-          ) : (
-            <div className="space-y-4">
-              <div className="flex items-center justify-between rounded-lg bg-[#1DB954]/10 p-4">
-                <div className="flex items-center gap-3">
-                  <CheckCircle className="h-6 w-6 text-[#1DB954]" />
-                  <div>
-                    <p className="font-medium text-white">Fichier importé avec succès</p>
-                    <p className="text-sm text-gray-400">{file?.name}</p>
-                  </div>
-                </div>
-                <Button variant="ghost" size="sm" onClick={resetImport} className="text-gray-400 hover:text-white">
-                  <X className="h-4 w-4" />
-                </Button>
-              </div>
+                  </span>
+                </li>
+                <li className="flex gap-2">
+                  <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-[#1DB954]/20 text-xs text-[#1DB954]">
+                    2
+                  </span>
+                  <span>Demande une copie de tes données (section "Télécharger tes données")</span>
+                </li>
+                <li className="flex gap-2">
+                  <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-[#1DB954]/20 text-xs text-[#1DB954]">
+                    3
+                  </span>
+                  <span>Tu recevras un email avec un lien de téléchargement sous 30 jours</span>
+                </li>
+                <li className="flex gap-2">
+                  <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-[#1DB954]/20 text-xs text-[#1DB954]">
+                    4
+                  </span>
+                  <span>Importe tous les fichiers StreamingHistory ou endsong en une seule fois</span>
+                </li>
+              </ol>
             </div>
           )}
         </CardContent>
@@ -336,6 +502,30 @@ export function CsvImporter({ onDataImported }: { onDataImported?: (data: Parsed
       {/* Parsed Results */}
       {parsedData && (
         <>
+          <Card className="border-[#1DB954]/30 bg-[#1DB954]/10 backdrop-blur-sm">
+            <CardContent className="flex items-center justify-between p-4">
+              <div className="flex items-center gap-3">
+                <CheckCircle className="h-6 w-6 text-[#1DB954]" />
+                <div>
+                  <p className="font-medium text-white">
+                    {successCount} fichier{successCount > 1 ? "s" : ""} importé{successCount > 1 ? "s" : ""} avec succès
+                  </p>
+                  <p className="text-sm text-gray-400">
+                    {allRawData.length.toLocaleString()} entrées totales analysées
+                  </p>
+                </div>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={resetImport}
+                className="border-white/20 hover:bg-white/10 bg-transparent"
+              >
+                Nouvelle importation
+              </Button>
+            </CardContent>
+          </Card>
+
           {/* Stats Overview */}
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
             <Card className="border-white/10 bg-gradient-to-br from-[#1DB954]/20 to-transparent backdrop-blur-sm">
@@ -476,13 +666,16 @@ export function CsvImporter({ onDataImported }: { onDataImported?: (data: Parsed
                           {month.minutes.toLocaleString()} min
                         </div>
                         <div
-                          className="w-full rounded-t bg-[#1DB954] transition-all hover:bg-[#1ed760]"
+                          className="w-full rounded-t bg-gradient-to-t from-[#1DB954] to-[#1ed760] transition-all group-hover:opacity-80"
                           style={{ height: `${height}%` }}
                         />
                         <span className="mt-2 text-xs text-gray-500">{month.month.split("-")[1]}</span>
                       </div>
                     )
                   })}
+                </div>
+                <div className="mt-4 flex justify-center">
+                  <p className="text-xs text-gray-500">Affichage des 12 derniers mois</p>
                 </div>
               </CardContent>
             </Card>
