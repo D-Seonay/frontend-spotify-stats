@@ -22,6 +22,8 @@ import {
   User,
   BarChart3,
   TrendingUp,
+  ChevronDown,
+  ChevronUp,
 } from "lucide-react"
 import {
   AreaChart,
@@ -53,6 +55,9 @@ interface ParsedStats {
   topTracks: { name: string; artist: string; plays: number; minutes: number }[]
   topArtists: { name: string; plays: number; minutes: number }[]
   listeningByMonth: { month: string; minutes: number }[]
+  listeningByDay: { date: string; minutes: number; streams: number }[]
+  listeningByHour: { hour: number; minutes: number }[]
+  listeningByWeekday: { day: string; minutes: number }[]
 }
 
 interface FileInfo {
@@ -62,17 +67,125 @@ interface FileInfo {
   recordCount?: number
 }
 
-interface DailyActivity {
-  date: string
-  minutes: number
-  streams: number
-}
-
 interface Filters {
-  artist: string
-  track: string
+  artistSearch: string
+  trackSearch: string
   dateFrom: string
   dateTo: string
+  minPlaytime: number
+}
+
+function ActivityHeatmap({ data }: { data: { date: string; minutes: number; streams: number }[] }) {
+  const weeks = useMemo(() => {
+    if (data.length === 0) return []
+
+    const dataMap = new Map(data.map((d) => [d.date, d]))
+    const endDate = new Date()
+    const startDate = new Date()
+    startDate.setDate(startDate.getDate() - 364)
+
+    const allDays: { date: string; minutes: number; streams: number; weekday: number }[] = []
+    const current = new Date(startDate)
+
+    while (current <= endDate) {
+      const dateStr = current.toISOString().split("T")[0]
+      const existing = dataMap.get(dateStr)
+      allDays.push({
+        date: dateStr,
+        minutes: existing?.minutes || 0,
+        streams: existing?.streams || 0,
+        weekday: current.getDay(),
+      })
+      current.setDate(current.getDate() + 1)
+    }
+
+    const weeksArray: (typeof allDays)[] = []
+    let currentWeek: typeof allDays = []
+
+    allDays.forEach((day, index) => {
+      if (index === 0) {
+        for (let i = 0; i < day.weekday; i++) {
+          currentWeek.push({ date: "", minutes: 0, streams: 0, weekday: i })
+        }
+      }
+      currentWeek.push(day)
+      if (day.weekday === 6 || index === allDays.length - 1) {
+        weeksArray.push(currentWeek)
+        currentWeek = []
+      }
+    })
+
+    return weeksArray
+  }, [data])
+
+  const maxMinutes = useMemo(() => Math.max(...data.map((d) => d.minutes), 1), [data])
+
+  const getIntensity = (minutes: number) => {
+    if (minutes === 0) return "bg-white/5"
+    const ratio = minutes / maxMinutes
+    if (ratio < 0.25) return "bg-[#1DB954]/30"
+    if (ratio < 0.5) return "bg-[#1DB954]/50"
+    if (ratio < 0.75) return "bg-[#1DB954]/70"
+    return "bg-[#1DB954]"
+  }
+
+  const dayLabels = ["Dim", "Lun", "Mar", "Mer", "Jeu", "Ven", "Sam"]
+  const monthLabels = ["Jan", "Fév", "Mar", "Avr", "Mai", "Jun", "Jul", "Aoû", "Sep", "Oct", "Nov", "Déc"]
+
+  return (
+    <div className="space-y-2">
+      <div className="flex gap-1 overflow-x-auto pb-2">
+        <div className="flex flex-col gap-1 pr-2 text-xs text-gray-500">
+          {dayLabels.map((day, i) => (
+            <div key={i} className="h-3 leading-3">
+              {i % 2 === 1 ? day : ""}
+            </div>
+          ))}
+        </div>
+        <div className="flex gap-1">
+          {weeks.map((week, weekIndex) => (
+            <div key={weekIndex} className="flex flex-col gap-1">
+              {week.map((day, dayIndex) => (
+                <div
+                  key={dayIndex}
+                  className={`group relative h-3 w-3 rounded-sm transition-all hover:ring-1 hover:ring-white/50 ${
+                    day.date ? getIntensity(day.minutes) : "bg-transparent"
+                  }`}
+                >
+                  {day.date && day.minutes > 0 && (
+                    <div className="pointer-events-none absolute -top-12 left-1/2 z-50 hidden -translate-x-1/2 whitespace-nowrap rounded bg-black/90 px-2 py-1 text-xs group-hover:block">
+                      <p className="font-medium">{day.date}</p>
+                      <p className="text-gray-400">
+                        {day.minutes} min · {day.streams} écoutes
+                      </p>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="flex items-center justify-between text-xs text-gray-500">
+        <div className="flex gap-4">
+          {monthLabels.map((month) => (
+            <span key={month}>{month}</span>
+          ))}
+        </div>
+        <div className="flex items-center gap-2">
+          <span>Moins</span>
+          <div className="flex gap-1">
+            <div className="h-3 w-3 rounded-sm bg-white/5" />
+            <div className="h-3 w-3 rounded-sm bg-[#1DB954]/30" />
+            <div className="h-3 w-3 rounded-sm bg-[#1DB954]/50" />
+            <div className="h-3 w-3 rounded-sm bg-[#1DB954]/70" />
+            <div className="h-3 w-3 rounded-sm bg-[#1DB954]" />
+          </div>
+          <span>Plus</span>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 export function CsvImporter({ onDataImported }: { onDataImported?: (data: ParsedStats) => void }) {
@@ -82,13 +195,14 @@ export function CsvImporter({ onDataImported }: { onDataImported?: (data: Parsed
   const [error, setError] = useState<string | null>(null)
   const [parsedData, setParsedData] = useState<ParsedStats | null>(null)
   const [allRawData, setAllRawData] = useState<SpotifyStreamingData[]>([])
+  const [showFilters, setShowFilters] = useState(false)
   const [filters, setFilters] = useState<Filters>({
-    artist: "",
-    track: "",
+    artistSearch: "",
+    trackSearch: "",
     dateFrom: "",
     dateTo: "",
+    minPlaytime: 0,
   })
-  const [showFilters, setShowFilters] = useState(false)
   const [activeChart, setActiveChart] = useState<"area" | "bar" | "pie">("area")
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -96,21 +210,26 @@ export function CsvImporter({ onDataImported }: { onDataImported?: (data: Parsed
     if (allRawData.length === 0) return []
 
     return allRawData.filter((item) => {
-      const matchesArtist = filters.artist ? item.artistName.toLowerCase().includes(filters.artist.toLowerCase()) : true
-      const matchesTrack = filters.track ? item.trackName.toLowerCase().includes(filters.track.toLowerCase()) : true
-
-      let matchesDate = true
-      if (filters.dateFrom || filters.dateTo) {
-        const itemDate = new Date(item.endTime)
-        if (filters.dateFrom) {
-          matchesDate = matchesDate && itemDate >= new Date(filters.dateFrom)
-        }
-        if (filters.dateTo) {
-          matchesDate = matchesDate && itemDate <= new Date(filters.dateTo)
-        }
+      if (filters.artistSearch && !item.artistName.toLowerCase().includes(filters.artistSearch.toLowerCase())) {
+        return false
       }
-
-      return matchesArtist && matchesTrack && matchesDate
+      if (filters.trackSearch && !item.trackName.toLowerCase().includes(filters.trackSearch.toLowerCase())) {
+        return false
+      }
+      if (filters.dateFrom && item.endTime) {
+        const itemDate = new Date(item.endTime)
+        const fromDate = new Date(filters.dateFrom)
+        if (itemDate < fromDate) return false
+      }
+      if (filters.dateTo && item.endTime) {
+        const itemDate = new Date(item.endTime)
+        const toDate = new Date(filters.dateTo)
+        if (itemDate > toDate) return false
+      }
+      if (filters.minPlaytime > 0 && item.msPlayed / 60000 < filters.minPlaytime) {
+        return false
+      }
+      return true
     })
   }, [allRawData, filters])
 
@@ -118,86 +237,6 @@ export function CsvImporter({ onDataImported }: { onDataImported?: (data: Parsed
     if (filteredData.length === 0) return null
     return analyzeData(filteredData)
   }, [filteredData])
-
-  const dailyActivity = useMemo((): DailyActivity[] => {
-    if (filteredData.length === 0) return []
-
-    const dailyMap = new Map<string, { minutes: number; streams: number }>()
-
-    filteredData.forEach((item) => {
-      if (item.endTime) {
-        const date = new Date(item.endTime)
-        const dateKey = date.toISOString().split("T")[0]
-        const existing = dailyMap.get(dateKey) || { minutes: 0, streams: 0 }
-        existing.minutes += item.msPlayed / 60000
-        existing.streams++
-        dailyMap.set(dateKey, existing)
-      }
-    })
-
-    return Array.from(dailyMap.entries())
-      .map(([date, data]) => ({
-        date,
-        minutes: Math.round(data.minutes),
-        streams: data.streams,
-      }))
-      .sort((a, b) => a.date.localeCompare(b.date))
-  }, [filteredData])
-
-  const heatmapData = useMemo(() => {
-    const today = new Date()
-    const startDate = new Date(today)
-    startDate.setDate(startDate.getDate() - 364)
-
-    const dailyMap = new Map<string, number>()
-    dailyActivity.forEach((d) => dailyMap.set(d.date, d.minutes))
-
-    const weeks: { date: Date; minutes: number }[][] = []
-    let currentWeek: { date: Date; minutes: number }[] = []
-
-    // Start from the first Sunday before or on startDate
-    const currentDate = new Date(startDate)
-    currentDate.setDate(currentDate.getDate() - currentDate.getDay())
-
-    while (currentDate <= today) {
-      const dateStr = currentDate.toISOString().split("T")[0]
-      currentWeek.push({
-        date: new Date(currentDate),
-        minutes: dailyMap.get(dateStr) || 0,
-      })
-
-      if (currentWeek.length === 7) {
-        weeks.push(currentWeek)
-        currentWeek = []
-      }
-
-      currentDate.setDate(currentDate.getDate() + 1)
-    }
-
-    if (currentWeek.length > 0) {
-      weeks.push(currentWeek)
-    }
-
-    return weeks
-  }, [dailyActivity])
-
-  const uniqueArtistsList = useMemo(() => {
-    const artists = new Set<string>()
-    allRawData.forEach((item) => artists.add(item.artistName))
-    return Array.from(artists).sort()
-  }, [allRawData])
-
-  const dateRange = useMemo(() => {
-    if (allRawData.length === 0) return { min: "", max: "" }
-    const dates = allRawData.map((item) => new Date(item.endTime)).filter((d) => !isNaN(d.getTime()))
-    if (dates.length === 0) return { min: "", max: "" }
-    const minDate = new Date(Math.min(...dates.map((d) => d.getTime())))
-    const maxDate = new Date(Math.max(...dates.map((d) => d.getTime())))
-    return {
-      min: minDate.toISOString().split("T")[0],
-      max: maxDate.toISOString().split("T")[0],
-    }
-  }, [allRawData])
 
   const parseCSV = (text: string): SpotifyStreamingData[] => {
     const lines = text.trim().split("\n")
@@ -245,10 +284,13 @@ export function CsvImporter({ onDataImported }: { onDataImported?: (data: Parsed
       .filter((item: SpotifyStreamingData) => item.artistName && item.trackName)
   }
 
-  function analyzeData(data: SpotifyStreamingData[]): ParsedStats {
+  const analyzeData = (data: SpotifyStreamingData[]): ParsedStats => {
     const trackMap = new Map<string, { plays: number; minutes: number; artist: string }>()
     const artistMap = new Map<string, { plays: number; minutes: number }>()
     const monthMap = new Map<string, number>()
+    const dayMap = new Map<string, { minutes: number; streams: number }>()
+    const hourMap = new Map<number, number>()
+    const weekdayMap = new Map<number, number>()
 
     let totalMinutes = 0
 
@@ -271,6 +313,18 @@ export function CsvImporter({ onDataImported }: { onDataImported?: (data: Parsed
         const date = new Date(item.endTime)
         const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`
         monthMap.set(monthKey, (monthMap.get(monthKey) || 0) + minutes)
+
+        const dayKey = date.toISOString().split("T")[0]
+        const dayStats = dayMap.get(dayKey) || { minutes: 0, streams: 0 }
+        dayStats.minutes += minutes
+        dayStats.streams++
+        dayMap.set(dayKey, dayStats)
+
+        const hour = date.getHours()
+        hourMap.set(hour, (hourMap.get(hour) || 0) + minutes)
+
+        const weekday = date.getDay()
+        weekdayMap.set(weekday, (weekdayMap.get(weekday) || 0) + minutes)
       }
     })
 
@@ -291,6 +345,21 @@ export function CsvImporter({ onDataImported }: { onDataImported?: (data: Parsed
       .map(([month, minutes]) => ({ month, minutes: Math.round(minutes) }))
       .sort((a, b) => a.month.localeCompare(b.month))
 
+    const listeningByDay = Array.from(dayMap.entries())
+      .map(([date, stats]) => ({ date, minutes: Math.round(stats.minutes), streams: stats.streams }))
+      .sort((a, b) => a.date.localeCompare(b.date))
+
+    const listeningByHour = Array.from({ length: 24 }, (_, hour) => ({
+      hour,
+      minutes: Math.round(hourMap.get(hour) || 0),
+    }))
+
+    const weekdayNames = ["Dim", "Lun", "Mar", "Mer", "Jeu", "Ven", "Sam"]
+    const listeningByWeekday = weekdayNames.map((day, index) => ({
+      day,
+      minutes: Math.round(weekdayMap.get(index) || 0),
+    }))
+
     return {
       totalStreams: data.length,
       totalMinutes: Math.round(totalMinutes),
@@ -299,6 +368,9 @@ export function CsvImporter({ onDataImported }: { onDataImported?: (data: Parsed
       topTracks,
       topArtists,
       listeningByMonth,
+      listeningByDay,
+      listeningByHour,
+      listeningByWeekday,
     }
   }
 
@@ -426,17 +498,30 @@ export function CsvImporter({ onDataImported }: { onDataImported?: (data: Parsed
     setParsedData(null)
     setError(null)
     setAllRawData([])
-    setFilters({ artist: "", track: "", dateFrom: "", dateTo: "" })
+    setFilters({
+      artistSearch: "",
+      trackSearch: "",
+      dateFrom: "",
+      dateTo: "",
+      minPlaytime: 0,
+    })
     if (fileInputRef.current) {
       fileInputRef.current.value = ""
     }
   }
 
   const clearFilters = () => {
-    setFilters({ artist: "", track: "", dateFrom: "", dateTo: "" })
+    setFilters({
+      artistSearch: "",
+      trackSearch: "",
+      dateFrom: "",
+      dateTo: "",
+      minPlaytime: 0,
+    })
   }
 
-  const hasActiveFilters = filters.artist || filters.track || filters.dateFrom || filters.dateTo
+  const hasActiveFilters =
+    filters.artistSearch || filters.trackSearch || filters.dateFrom || filters.dateTo || filters.minPlaytime > 0
 
   const getStatusBadge = (status: FileInfo["status"]) => {
     switch (status) {
@@ -468,23 +553,12 @@ export function CsvImporter({ onDataImported }: { onDataImported?: (data: Parsed
     }
   }
 
-  const getHeatmapColor = (minutes: number): string => {
-    if (minutes === 0) return "bg-white/5"
-    const maxMinutes = Math.max(...dailyActivity.map((d) => d.minutes), 1)
-    const intensity = minutes / maxMinutes
-    if (intensity < 0.25) return "bg-[#1DB954]/25"
-    if (intensity < 0.5) return "bg-[#1DB954]/50"
-    if (intensity < 0.75) return "bg-[#1DB954]/75"
-    return "bg-[#1DB954]"
-  }
-
   const pendingCount = files.filter((f) => f.status === "pending").length
   const successCount = files.filter((f) => f.status === "success").length
   const errorCount = files.filter((f) => f.status === "error").length
 
-  const CHART_COLORS = ["#1DB954", "#1ed760", "#169c46", "#12753a", "#0f5d30"]
-
-  const displayStats = hasActiveFilters ? filteredStats : parsedData
+  const displayStats = filteredStats || parsedData
+  const CHART_COLORS = ["#1DB954", "#1ed760", "#169c46", "#14833b", "#0f5c2a", "#0a4420", "#063116", "#021f0d"]
 
   return (
     <div className="space-y-6">
@@ -678,7 +752,7 @@ export function CsvImporter({ onDataImported }: { onDataImported?: (data: Parsed
         </CardContent>
       </Card>
 
-      {/* Parsed Results */}
+      {/* Parsed Results with Filters and Visualizations */}
       {parsedData && (
         <>
           <Card className="border-[#1DB954]/30 bg-[#1DB954]/10 backdrop-blur-sm">
@@ -690,7 +764,8 @@ export function CsvImporter({ onDataImported }: { onDataImported?: (data: Parsed
                     {successCount} fichier{successCount > 1 ? "s" : ""} importé{successCount > 1 ? "s" : ""} avec succès
                   </p>
                   <p className="text-sm text-gray-400">
-                    {allRawData.length.toLocaleString()} entrées totales analysées
+                    {allRawData.length.toLocaleString()} entrées totales
+                    {hasActiveFilters && ` • ${filteredData.length.toLocaleString()} après filtrage`}
                   </p>
                 </div>
               </div>
@@ -706,107 +781,104 @@ export function CsvImporter({ onDataImported }: { onDataImported?: (data: Parsed
           </Card>
 
           <Card className="border-white/10 bg-white/5 backdrop-blur-sm">
-            <CardHeader className="pb-3">
-              <div className="flex items-center justify-between">
-                <CardTitle className="flex items-center gap-2 text-lg">
+            <CardHeader
+              className="cursor-pointer transition-colors hover:bg-white/5"
+              onClick={() => setShowFilters(!showFilters)}
+            >
+              <CardTitle className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
                   <Filter className="h-5 w-5 text-[#1DB954]" />
                   Filtres avancés
-                </CardTitle>
-                <div className="flex items-center gap-2">
                   {hasActiveFilters && (
-                    <Button variant="ghost" size="sm" onClick={clearFilters} className="text-gray-400 hover:text-white">
-                      <X className="mr-1 h-4 w-4" />
-                      Effacer
-                    </Button>
+                    <span className="rounded-full bg-[#1DB954]/20 px-2 py-1 text-xs text-[#1DB954]">Actifs</span>
                   )}
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setShowFilters(!showFilters)}
-                    className="text-gray-400 hover:text-white"
-                  >
-                    {showFilters ? "Masquer" : "Afficher"}
-                  </Button>
                 </div>
-              </div>
-              {hasActiveFilters && (
-                <p className="text-sm text-[#1DB954]">
-                  {filteredData.length.toLocaleString()} résultats sur {allRawData.length.toLocaleString()}
-                </p>
-              )}
+                {showFilters ? (
+                  <ChevronUp className="h-5 w-5 text-gray-400" />
+                ) : (
+                  <ChevronDown className="h-5 w-5 text-gray-400" />
+                )}
+              </CardTitle>
             </CardHeader>
             {showFilters && (
               <CardContent className="space-y-4">
                 <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
                   <div className="space-y-2">
-                    <label className="flex items-center gap-2 text-sm font-medium text-gray-400">
+                    <label className="flex items-center gap-2 text-sm text-gray-400">
                       <User className="h-4 w-4" />
                       Artiste
                     </label>
                     <div className="relative">
                       <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
                       <Input
-                        type="text"
                         placeholder="Rechercher un artiste..."
-                        value={filters.artist}
-                        onChange={(e) => setFilters((f) => ({ ...f, artist: e.target.value }))}
-                        className="border-white/10 bg-white/5 pl-10 text-white placeholder:text-gray-500"
-                        list="artists-list"
+                        value={filters.artistSearch}
+                        onChange={(e) => setFilters((f) => ({ ...f, artistSearch: e.target.value }))}
+                        className="border-white/10 bg-white/5 pl-10"
                       />
-                      <datalist id="artists-list">
-                        {uniqueArtistsList.slice(0, 50).map((artist) => (
-                          <option key={artist} value={artist} />
-                        ))}
-                      </datalist>
                     </div>
                   </div>
-
                   <div className="space-y-2">
-                    <label className="flex items-center gap-2 text-sm font-medium text-gray-400">
+                    <label className="flex items-center gap-2 text-sm text-gray-400">
                       <Music className="h-4 w-4" />
                       Titre
                     </label>
                     <div className="relative">
                       <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500" />
                       <Input
-                        type="text"
                         placeholder="Rechercher un titre..."
-                        value={filters.track}
-                        onChange={(e) => setFilters((f) => ({ ...f, track: e.target.value }))}
-                        className="border-white/10 bg-white/5 pl-10 text-white placeholder:text-gray-500"
+                        value={filters.trackSearch}
+                        onChange={(e) => setFilters((f) => ({ ...f, trackSearch: e.target.value }))}
+                        className="border-white/10 bg-white/5 pl-10"
                       />
                     </div>
                   </div>
-
                   <div className="space-y-2">
-                    <label className="flex items-center gap-2 text-sm font-medium text-gray-400">
+                    <label className="flex items-center gap-2 text-sm text-gray-400">
                       <Calendar className="h-4 w-4" />
-                      Date début
+                      Date de début
                     </label>
                     <Input
                       type="date"
                       value={filters.dateFrom}
-                      min={dateRange.min}
-                      max={dateRange.max}
                       onChange={(e) => setFilters((f) => ({ ...f, dateFrom: e.target.value }))}
-                      className="border-white/10 bg-white/5 text-white"
+                      className="border-white/10 bg-white/5"
                     />
                   </div>
-
                   <div className="space-y-2">
-                    <label className="flex items-center gap-2 text-sm font-medium text-gray-400">
+                    <label className="flex items-center gap-2 text-sm text-gray-400">
                       <Calendar className="h-4 w-4" />
-                      Date fin
+                      Date de fin
                     </label>
                     <Input
                       type="date"
                       value={filters.dateTo}
-                      min={dateRange.min}
-                      max={dateRange.max}
                       onChange={(e) => setFilters((f) => ({ ...f, dateTo: e.target.value }))}
-                      className="border-white/10 bg-white/5 text-white"
+                      className="border-white/10 bg-white/5"
                     />
                   </div>
+                </div>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-4">
+                    <label className="flex items-center gap-2 text-sm text-gray-400">
+                      <Clock className="h-4 w-4" />
+                      Durée minimum (min)
+                    </label>
+                    <Input
+                      type="number"
+                      min="0"
+                      value={filters.minPlaytime || ""}
+                      onChange={(e) => setFilters((f) => ({ ...f, minPlaytime: Number(e.target.value) || 0 }))}
+                      className="w-24 border-white/10 bg-white/5"
+                      placeholder="0"
+                    />
+                  </div>
+                  {hasActiveFilters && (
+                    <Button variant="ghost" size="sm" onClick={clearFilters} className="text-gray-400 hover:text-white">
+                      <X className="mr-2 h-4 w-4" />
+                      Effacer les filtres
+                    </Button>
+                  )}
                 </div>
               </CardContent>
             )}
@@ -837,9 +909,7 @@ export function CsvImporter({ onDataImported }: { onDataImported?: (data: Parsed
                   </CardHeader>
                   <CardContent>
                     <p className="text-3xl font-bold text-[#1DB954]">{displayStats.totalMinutes.toLocaleString()}</p>
-                    <p className="text-xs text-gray-500">
-                      ~{Math.round(displayStats.totalMinutes / 60).toLocaleString()} heures
-                    </p>
+                    <p className="text-sm text-gray-500">{Math.round(displayStats.totalMinutes / 60)} heures</p>
                   </CardContent>
                 </Card>
 
@@ -875,72 +945,25 @@ export function CsvImporter({ onDataImported }: { onDataImported?: (data: Parsed
                     Activité d'écoute
                   </CardTitle>
                   <CardDescription className="text-gray-400">
-                    Visualise ton activité quotidienne sur les 12 derniers mois
+                    Ton historique d'écoute sur les 12 derniers mois
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
-                  <div className="overflow-x-auto pb-2">
-                    <div className="inline-flex flex-col gap-1">
-                      <div className="mb-1 flex gap-1 text-xs text-gray-500">
-                        <span className="w-8"></span>
-                        {["Jan", "Fév", "Mar", "Avr", "Mai", "Jun", "Jul", "Aoû", "Sep", "Oct", "Nov", "Déc"].map(
-                          (month) => (
-                            <span key={month} className="w-[52px] text-center">
-                              {month}
-                            </span>
-                          ),
-                        )}
-                      </div>
-                      <div className="flex gap-1">
-                        <div className="flex w-8 flex-col justify-around text-xs text-gray-500">
-                          <span>Lun</span>
-                          <span>Mer</span>
-                          <span>Ven</span>
-                        </div>
-                        <div className="flex gap-[3px]">
-                          {heatmapData.map((week, weekIndex) => (
-                            <div key={weekIndex} className="flex flex-col gap-[3px]">
-                              {week.map((day, dayIndex) => (
-                                <div
-                                  key={dayIndex}
-                                  className={`group relative h-3 w-3 rounded-sm transition-all hover:ring-1 hover:ring-white/50 ${getHeatmapColor(day.minutes)}`}
-                                  title={`${day.date}: ${day.minutes} minutes`}
-                                >
-                                  <div className="pointer-events-none absolute -top-10 left-1/2 z-10 hidden -translate-x-1/2 whitespace-nowrap rounded bg-black/90 px-2 py-1 text-xs text-white shadow-lg group-hover:block">
-                                    <div className="font-medium">{day.date}</div>
-                                    <div className="text-[#1DB954]">{day.minutes} min</div>
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                      <div className="mt-3 flex items-center justify-end gap-2 text-xs text-gray-500">
-                        <span>Moins</span>
-                        <div className="flex gap-1">
-                          <div className="h-3 w-3 rounded-sm bg-white/5" />
-                          <div className="h-3 w-3 rounded-sm bg-[#1DB954]/25" />
-                          <div className="h-3 w-3 rounded-sm bg-[#1DB954]/50" />
-                          <div className="h-3 w-3 rounded-sm bg-[#1DB954]/75" />
-                          <div className="h-3 w-3 rounded-sm bg-[#1DB954]" />
-                        </div>
-                        <span>Plus</span>
-                      </div>
-                    </div>
-                  </div>
+                  <ActivityHeatmap data={displayStats.listeningByDay} />
                 </CardContent>
               </Card>
 
               <Card className="border-white/10 bg-white/5 backdrop-blur-sm">
                 <CardHeader>
-                  <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex items-center justify-between">
                     <div>
                       <CardTitle className="flex items-center gap-2">
                         <BarChart3 className="h-5 w-5 text-[#1DB954]" />
                         Visualisations
                       </CardTitle>
-                      <CardDescription className="text-gray-400">Analyse interactive de tes données</CardDescription>
+                      <CardDescription className="text-gray-400">
+                        Explore tes données d'écoute de différentes manières
+                      </CardDescription>
                     </div>
                     <div className="flex gap-2">
                       <Button
@@ -953,8 +976,8 @@ export function CsvImporter({ onDataImported }: { onDataImported?: (data: Parsed
                             : "border-white/20 bg-transparent hover:bg-white/10"
                         }
                       >
-                        <TrendingUp className="mr-1 h-4 w-4" />
-                        Évolution
+                        <TrendingUp className="mr-2 h-4 w-4" />
+                        Tendance
                       </Button>
                       <Button
                         variant={activeChart === "bar" ? "default" : "outline"}
@@ -966,8 +989,8 @@ export function CsvImporter({ onDataImported }: { onDataImported?: (data: Parsed
                             : "border-white/20 bg-transparent hover:bg-white/10"
                         }
                       >
-                        <BarChart3 className="mr-1 h-4 w-4" />
-                        Barres
+                        <BarChart3 className="mr-2 h-4 w-4" />
+                        Heures
                       </Button>
                       <Button
                         variant={activeChart === "pie" ? "default" : "outline"}
@@ -979,7 +1002,8 @@ export function CsvImporter({ onDataImported }: { onDataImported?: (data: Parsed
                             : "border-white/20 bg-transparent hover:bg-white/10"
                         }
                       >
-                        Top Artistes
+                        <Calendar className="mr-2 h-4 w-4" />
+                        Jours
                       </Button>
                     </div>
                   </div>
@@ -996,39 +1020,16 @@ export function CsvImporter({ onDataImported }: { onDataImported?: (data: Parsed
                             </linearGradient>
                           </defs>
                           <CartesianGrid strokeDasharray="3 3" stroke="#333" />
-                          <XAxis
-                            dataKey="month"
-                            stroke="#888"
-                            tick={{ fill: "#888", fontSize: 12 }}
-                            tickFormatter={(value) => {
-                              const [, month] = value.split("-")
-                              const months = [
-                                "Jan",
-                                "Fév",
-                                "Mar",
-                                "Avr",
-                                "Mai",
-                                "Jun",
-                                "Jul",
-                                "Aoû",
-                                "Sep",
-                                "Oct",
-                                "Nov",
-                                "Déc",
-                              ]
-                              return months[Number.parseInt(month) - 1] || month
-                            }}
-                          />
-                          <YAxis stroke="#888" tick={{ fill: "#888", fontSize: 12 }} />
+                          <XAxis dataKey="month" stroke="#888" fontSize={12} tickLine={false} />
+                          <YAxis stroke="#888" fontSize={12} tickLine={false} tickFormatter={(v) => `${v}m`} />
                           <Tooltip
                             contentStyle={{
                               backgroundColor: "#1a1a1a",
                               border: "1px solid #333",
                               borderRadius: "8px",
+                              color: "#fff",
                             }}
-                            labelStyle={{ color: "#fff" }}
-                            itemStyle={{ color: "#1DB954" }}
-                            formatter={(value: number) => [`${value.toLocaleString()} min`, "Écoute"]}
+                            formatter={(value: number) => [`${value.toLocaleString()} minutes`, "Écoute"]}
                           />
                           <Area
                             type="monotone"
@@ -1042,64 +1043,49 @@ export function CsvImporter({ onDataImported }: { onDataImported?: (data: Parsed
                       </ResponsiveContainer>
                     )}
 
-                    {activeChart === "bar" && displayStats.listeningByMonth.length > 0 && (
+                    {activeChart === "bar" && (
                       <ResponsiveContainer width="100%" height="100%">
-                        <BarChart data={displayStats.listeningByMonth}>
+                        <BarChart data={displayStats.listeningByHour}>
                           <CartesianGrid strokeDasharray="3 3" stroke="#333" />
                           <XAxis
-                            dataKey="month"
+                            dataKey="hour"
                             stroke="#888"
-                            tick={{ fill: "#888", fontSize: 12 }}
-                            tickFormatter={(value) => {
-                              const [, month] = value.split("-")
-                              const months = [
-                                "Jan",
-                                "Fév",
-                                "Mar",
-                                "Avr",
-                                "Mai",
-                                "Jun",
-                                "Jul",
-                                "Aoû",
-                                "Sep",
-                                "Oct",
-                                "Nov",
-                                "Déc",
-                              ]
-                              return months[Number.parseInt(month) - 1] || month
-                            }}
+                            fontSize={12}
+                            tickLine={false}
+                            tickFormatter={(h) => `${h}h`}
                           />
-                          <YAxis stroke="#888" tick={{ fill: "#888", fontSize: 12 }} />
+                          <YAxis stroke="#888" fontSize={12} tickLine={false} tickFormatter={(v) => `${v}m`} />
                           <Tooltip
                             contentStyle={{
                               backgroundColor: "#1a1a1a",
                               border: "1px solid #333",
                               borderRadius: "8px",
+                              color: "#fff",
                             }}
-                            labelStyle={{ color: "#fff" }}
-                            itemStyle={{ color: "#1DB954" }}
-                            formatter={(value: number) => [`${value.toLocaleString()} min`, "Écoute"]}
+                            formatter={(value: number) => [`${value.toLocaleString()} minutes`, "Écoute"]}
+                            labelFormatter={(label) => `${label}h00`}
                           />
                           <Bar dataKey="minutes" fill="#1DB954" radius={[4, 4, 0, 0]} />
                         </BarChart>
                       </ResponsiveContainer>
                     )}
 
-                    {activeChart === "pie" && displayStats.topArtists.length > 0 && (
+                    {activeChart === "pie" && (
                       <ResponsiveContainer width="100%" height="100%">
                         <PieChart>
                           <Pie
-                            data={displayStats.topArtists.slice(0, 5)}
+                            data={displayStats.listeningByWeekday}
                             cx="50%"
                             cy="50%"
+                            innerRadius={60}
+                            outerRadius={120}
+                            paddingAngle={2}
+                            dataKey="minutes"
+                            nameKey="day"
+                            label={({ day, percent }) => `${day} ${(percent * 100).toFixed(0)}%`}
                             labelLine={false}
-                            outerRadius={100}
-                            fill="#8884d8"
-                            dataKey="plays"
-                            nameKey="name"
-                            label={({ name, percent }) => `${name} (${(percent * 100).toFixed(0)}%)`}
                           >
-                            {displayStats.topArtists.slice(0, 5).map((_, index) => (
+                            {displayStats.listeningByWeekday.map((_, index) => (
                               <Cell key={`cell-${index}`} fill={CHART_COLORS[index % CHART_COLORS.length]} />
                             ))}
                           </Pie>
@@ -1108,9 +1094,9 @@ export function CsvImporter({ onDataImported }: { onDataImported?: (data: Parsed
                               backgroundColor: "#1a1a1a",
                               border: "1px solid #333",
                               borderRadius: "8px",
+                              color: "#fff",
                             }}
-                            labelStyle={{ color: "#fff" }}
-                            formatter={(value: number, name: string) => [`${value.toLocaleString()} écoutes`, name]}
+                            formatter={(value: number) => [`${value.toLocaleString()} minutes`, "Écoute"]}
                           />
                         </PieChart>
                       </ResponsiveContainer>
@@ -1139,7 +1125,7 @@ export function CsvImporter({ onDataImported }: { onDataImported?: (data: Parsed
                           className="flex items-center justify-between rounded-lg border border-white/5 bg-white/5 p-3 transition-all hover:bg-white/10"
                         >
                           <div className="flex min-w-0 flex-1 items-center gap-3">
-                            <span className="flex h-7 w-7 items-center justify-center rounded-full bg-[#1DB954]/20 text-sm font-bold text-[#1DB954]">
+                            <span className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-[#1DB954]/20 text-sm font-bold text-[#1DB954]">
                               {index + 1}
                             </span>
                             <div className="min-w-0 flex-1">
